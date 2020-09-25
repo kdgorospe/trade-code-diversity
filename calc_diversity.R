@@ -2,6 +2,8 @@
 rm(list = ls())
 
 library(tidyverse)
+library(data.table)
+library(vegan)
 
 outdir <- "Outputs"
 datadir <- "/Volumes/jgephart"
@@ -150,23 +152,80 @@ fishstat_by_year <- fishstat_dat %>%
 # Do this for different hs versions (e.g., for HS version 2012, use production data for 2012 to 2016)
 
 # Eventually loop through hs_version and prod_year:
-#prod_year <- seq(1992, max(fishstat_by_year$year), 1)
-#hs_breaks <- c(1992, 1996, 2002, 2007, 2012, 2016)
-#hs_version <- paste("HS", substr(hs_breaks, 3, 4), sep = "")
+last_year <- max(fishstat_by_year$year)
+prod_year <- seq(1992, last_year, 1)
+hs_breaks <- c(1992, 1996, 2002, 2007, 2012, 2017)
 
-# Set prod_year and hs_version for now:
-prod_year <- 2012
-hs_version <- "HS12"
+years_between <- c(diff(hs_breaks), (last_year - 2017 + 1)) # number of times to repeat "HS version" after each hs_break year
+hs_year <- rep(hs_breaks, times = years_between) # hs_breaks[-6] because 
+hs_version <- paste("HS", substr(hs_year, 3, 4), sep = "")
 
-hs_taxa_match <- read.csv(file.path(datadir, "ARTIS", "HS Taxa Matches", "match to FAO", paste("2020-09-23_hs-taxa-match_ver", hs_version, ".csv", sep = "")))
+hs_prod_year_match <- data.frame(cbind(prod_year = prod_year, hs_version = hs_version))
 
-diversity_dat <- hs_taxa_match %>%
-  left_join(fishstat_by_year %>% filter(year == prod_year), by = "SciName") %>%
-  #filter(Match_category %in% c()) %>% # Filter specific match categories before pivoting
-  select(Code, SciName, total_t) %>% 
-  mutate(total_t = replace_na(total_t, 0)) %>%
-  pivot_wider(names_from = SciName, values_from = total_t) %>%
-  mutate(across(everything(), ~replace_na(.x, 0)))
-    
-### LEFT OFF HERE:
-# Step 3: Then calculate Shannon Diversity (others like Simpsons?), using code as the "species" and production as the "counts/biomass"
+div_indices_list <- list()
+
+for (i in 1:nrow(hs_prod_year_match)){
+  # Set prod_year and hs_version for now:
+  #prod_year_i <- 2012
+  #hs_version_i <- "HS12"
+  
+  # Get prod_year and hs_version year
+  prod_year_i <- hs_prod_year_match[i, "prod_year"]
+  hs_version_i <- hs_prod_year_match[i, "hs_version"]
+
+  hs_taxa_match <- read.csv(file.path(datadir, "ARTIS", "HS Taxa Matches", "match to FAO", paste("2020-09-23_hs-taxa-match_ver", hs_version_i, ".csv", sep = "")))
+  
+  diversity_dat <- hs_taxa_match %>%
+    left_join(fishstat_by_year %>% filter(year == prod_year_i), by = "SciName") %>%
+    #filter(Match_category %in% c()) %>% # Filter specific match categories before pivoting
+    select(Code, SciName, total_t) %>% 
+    mutate(total_t = replace_na(total_t, 0)) %>%
+    pivot_wider(names_from = SciName, values_from = total_t) %>%
+    mutate(across(everything(), ~replace_na(.x, 0)))
+  
+  # Step 3: Then calculate Shannon Diversity (others like Simpsons?), using code as the "plots or ecosystems" and production as the "counts/biomass per species"
+  
+  # See examples in diversity() help file:
+  H <- diversity(diversity_dat[,-1], index = "shannon")
+  simp <- diversity(diversity_dat[,-1], index = "simpson")
+  invsimp <- diversity(diversity_dat[,-1], index = "inv")
+  #unbias.simp <- rarefy(diversity_dat[,-1], 2) - 1 # error: requires counts (i.e., INTEGERS); note: could go back to FAO fishstat data and subset "number" instead of "tons" 
+  
+  # Fisher alpha
+  #alpha <- fisher.alpha(diversity_dat[,-1]) # error: requires counts (i.e., INTEGERS)
+  
+  # Species richness (S) and Pielou's evenness (J):
+  S <- specnumber(diversity_dat[,-1])
+  J <- H/log(S)
+  
+  div_indices_year_i <- cbind.data.frame(code = diversity_dat$Code, 
+                                         year = prod_year_i,
+                                         hs_version = hs_version_i,
+                                         shannon = H,
+                                         simpson = simp,
+                                         invsimp = invsimp,
+                                         richness = S,
+                                         evenness = J)
+  
+  div_indices_list[[i]] <- div_indices_year_i
+}
+
+div_indices_dt <- data.table::rbindlist(div_indices_list)
+
+# Plot diversity indices per code through time
+index <- c("shannon", "simpson", "invsimp", "richness", "evenness")
+
+for (i in 1:length(index)){
+  p <- ggplot(data = div_indices_dt) +
+    geom_line(aes(x = year, y = !!as.name(index[i]), group = code)) +
+    labs(title = paste(index[i], " index of trade codes based on global production through time", sep = "")) +
+    theme_classic()
+  
+  plot(p)
+  # Note: warning about missing values:
+  # Comes from "evenness" index for trade codes that have one species ( evenness = shannon / log(richness)), when richness = 1, dividing by 0 leads to NaN
+}
+
+# LEFT OFF HERE: next add code family to data table? 0301, 0302, 0303 etc
+# Then either color code plots or split plots by code family (~facet_wrap)
+
